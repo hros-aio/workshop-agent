@@ -1,0 +1,15 @@
+{
+  "companies.csv": [
+    {"row": 2, "text": "company_code=00123; name=Acme Corporation; country=US"},
+    {"row": 3, "text": "company_code=00124; name=Globex Inc; country=DE"}
+  ],
+  "org.xlsx": [
+    {"sheet": "Companies", "row": 2, "text": "code=C1; name=Acme"},
+    {"sheet": "Departments", "row": 2, "text": "code=D1; name=Finance; company=C1"}
+  ],
+  "policy.docx": [
+    {"text": "Company policy excerpt: all employees report to a manager."},
+    {"sheet": "Table1", "row": 1, "text": "Location | Berlin"},
+    {"sheet": "Table1", "row": 2, "text": "Department | Finance"}
+  ]
+}

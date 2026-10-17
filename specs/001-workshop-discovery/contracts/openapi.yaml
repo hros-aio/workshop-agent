@@ -1,0 +1,1395 @@
+openapi: 3.1.0
+info:
+  title: Workshop Module API
+  version: 1.0.0
+  description: |
+    AI-assisted discovery workflow for HRMS implementations.
+
+    The existing NestJS HRMS server owns authentication and tenancy and calls this API
+    directly, forwarding the user's JWT in the `Authorization` header. This service verifies
+    the JWT and enforces project-scoped membership and role on every operation.
+
+    All paths are served under the `/workshop-api` prefix. Analysis Runs are asynchronous:
+    the trigger endpoint returns `202 Accepted` with a run id that is polled via the
+    analysis-run endpoints.
+
+    Errors use RFC 9457 `application/problem+json`.
+servers:
+  - url: https://{host}/workshop-api
+    variables:
+      host:
+        default: localhost:8000
+tags:
+  - name: Health
+  - name: Projects
+  - name: Members
+  - name: Documents
+  - name: Analysis Runs
+  - name: Proposals
+  - name: Review
+  - name: Validation
+  - name: Export
+  - name: Audit
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness/readiness probe
+      security: []
+      operationId: getHealth
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /projects:
+    post:
+      tags: [Projects]
+      summary: Create a Workshop Project
+      description: Requires platform role allowed to create projects. The creator is added as a CONSULTANT member.
+      operationId: createProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectCreate'
+      responses:
+        '201':
+          description: Project created in `Setup`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    get:
+      tags: [Projects]
+      summary: List projects the caller is a member of
+      operationId: listProjects
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ProjectStatus'
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+      responses:
+        '200':
+          description: Page of projects
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectPage'
+
+  /projects/{projectId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [Projects]
+      summary: Get a project
+      operationId: getProject
+      responses:
+        '200':
+          description: Project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Projects]
+      summary: Update project configuration
+      description: Only allowed while status is `Setup`. Scope must remain a non-empty subset of entity types.
+      operationId: updateProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectUpdate'
+      responses:
+        '200':
+          description: Updated project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /projects/{projectId}/overview:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [Projects]
+      summary: Progress overview for monitors
+      operationId: getProjectOverview
+      responses:
+        '200':
+          description: Progress counts and validation state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectOverview'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /projects/{projectId}/transition:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [Projects]
+      summary: Request a lifecycle transition
+      description: |
+        Transitions: Setup→Collecting Documents, Collecting Documents→In Analysis,
+        In Analysis→In Review, In Review→In Analysis, In Review→Finalized,
+        Finalized→Exported. `Exported→In Review` must use the reopen endpoint.
+        Guard failures (unresolved items, failing validation) return `409`.
+      operationId: transitionProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransitionRequest'
+      responses:
+        '200':
+          description: Transition applied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /projects/{projectId}/reopen:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [Projects]
+      summary: Explicitly reopen an exported project
+      description: Returns the project to `In Review`, records a PROJECT_REOPENED audit event, and increments reopen_count. Prior export packages are untouched.
+      operationId: reopenProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReopenRequest'
+      responses:
+        '200':
+          description: Project reopened
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /projects/{projectId}/members:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [Members]
+      summary: List project members
+      operationId: listMembers
+      responses:
+        '200':
+          description: Members
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProjectMember'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Members]
+      summary: Add a project member
+      operationId: addMember
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemberCreate'
+      responses:
+        '201':
+          description: Member added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectMember'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /projects/{projectId}/members/{memberId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/MemberId'
+    delete:
+      tags: [Members]
+      summary: Remove a project member
+      operationId: removeMember
+      responses:
+        '204':
+          description: Member removed
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{projectId}/audit-events:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [Audit]
+      summary: Query the append-only audit trail
+      operationId: listAuditEvents
+      parameters:
+        - name: action
+          in: query
+          schema: { type: string }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Page of audit events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEventPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /projects/{projectId}/documents:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [Documents]
+      summary: Create a document and request an upload URL
+      description: |
+        Creates the logical document plus version 1 and returns a short-TTL pre-signed PUT URL.
+        The client uploads directly to object storage, then calls the version completion endpoint.
+      operationId: createDocument
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentCreate'
+      responses:
+        '201':
+          description: Document and upload target created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentUploadTicket'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    get:
+      tags: [Documents]
+      summary: List documents in a project
+      operationId: listDocuments
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/DocumentStatus'
+      responses:
+        '200':
+          description: Documents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Document'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /projects/{projectId}/documents/{documentId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      tags: [Documents]
+      summary: Get a document with its versions
+      operationId: getDocument
+      responses:
+        '200':
+          description: Document with version history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentDetail'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{projectId}/documents/{documentId}/versions:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/DocumentId'
+    post:
+      tags: [Documents]
+      summary: Add a new version (replace a document)
+      description: Marks the current version superseded and returns an upload URL for the new version. The prior version is retained.
+      operationId: createDocumentVersion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentVersionCreate'
+      responses:
+        '201':
+          description: New version and upload target created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentUploadTicket'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /projects/{projectId}/documents/{documentId}/versions/{versionId}/complete:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/VersionId'
+    post:
+      tags: [Documents]
+      summary: Confirm that an upload finished
+      operationId: completeDocumentVersion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentVersionComplete'
+      responses:
+        '200':
+          description: Version marked uploaded (or parse-failed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentVersion'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /projects/{projectId}/documents/{documentId}/versions/{versionId}/download-url:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/VersionId'
+    get:
+      tags: [Documents]
+      summary: Get a short-TTL download URL for a version
+      operationId: getDocumentVersionDownloadUrl
+      responses:
+        '200':
+          description: Pre-signed GET URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DownloadUrl'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{projectId}/analysis-runs:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [Analysis Runs]
+      summary: Trigger an Analysis Run
+      description: |
+        Captures the active document-version snapshot, inserts a run in `Queued`, enqueues the
+        worker job, transitions the project to `In Analysis`, and returns `202`. A new round is
+        numbered `current_round + 1`. Fails with `409` if a run is already queued/running.
+      operationId: triggerAnalysisRun
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnalysisRunTrigger'
+      responses:
+        '202':
+          description: Run accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalysisRun'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    get:
+      tags: [Analysis Runs]
+      summary: List analysis runs for a project
+      operationId: listAnalysisRuns
+      responses:
+        '200':
+          description: Analysis runs, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AnalysisRun'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /projects/{projectId}/analysis-runs/{runId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RunId'
+    get:
+      tags: [Analysis Runs]
+      summary: Get an analysis run's status
+      operationId: getAnalysisRun
+      responses:
+        '200':
+          description: Analysis run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalysisRun'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{projectId}/analysis-runs/{runId}/retry:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RunId'
+    post:
+      tags: [Analysis Runs]
+      summary: Retry a failed analysis run
+      description: Creates a new run with the same input snapshot. Only valid when the prior run has status `Failed`.
+      operationId: retryAnalysisRun
+      responses:
+        '202':
+          description: Retry accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalysisRun'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /projects/{projectId}/proposals:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [Proposals]
+      summary: List proposal rounds
+      operationId: listProposals
+      responses:
+        '200':
+          description: Proposal rounds, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProposalRoundSummary'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /projects/{projectId}/proposals/{roundNumber}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RoundNumber'
+    get:
+      tags: [Proposals]
+      summary: Get a proposal round with its items
+      operationId: getProposalRound
+      parameters:
+        - name: entityType
+          in: query
+          schema:
+            $ref: '#/components/schemas/EntityType'
+        - name: itemState
+          in: query
+          schema:
+            $ref: '#/components/schemas/ItemState'
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: pageSize
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Proposal round and items
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProposalRound'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{projectId}/proposals/{roundNumber}/compare:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/RoundNumber'
+    get:
+      tags: [Proposals]
+      summary: Compare a round with another round
+      operationId: compareProposalRounds
+      parameters:
+        - name: otherRoundNumber
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Per-entity-key comparison
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoundComparison'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{projectId}/proposal-items/{itemId}/decisions:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/ItemId'
+    post:
+      tags: [Review]
+      summary: Record a review decision on a proposal item
+      description: |
+        Records an immutable decision. A comment is required for `Reject` and `Modify`.
+        `Modify` must include the edited `resultingValue`.
+      operationId: recordDecision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionCreate'
+      responses:
+        '201':
+          description: Decision recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Decision'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    get:
+      tags: [Review]
+      summary: List decisions recorded for an item
+      operationId: listDecisions
+      responses:
+        '200':
+          description: Decisions, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Decision'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /projects/{projectId}/proposal-items/{itemId}/trace:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/ItemId'
+    get:
+      tags: [Proposals]
+      summary: Trace the provenance of a proposal item
+      description: |
+        Returns the item's source references (document version, page/sheet/row/cell)
+        and its latest decision (who approved it, with which action, and when).
+      operationId: traceProposalItem
+      responses:
+        '200':
+          description: Proposal item with source references and latest decision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProposalItem'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{projectId}/validation-runs:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [Validation]
+      summary: Run validation
+      description: Evaluates the current accepted dataset against all rules and persists the run.
+      operationId: runValidation
+      responses:
+        '201':
+          description: Validation run result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationRun'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      tags: [Validation]
+      summary: List validation runs
+      operationId: listValidationRuns
+      responses:
+        '200':
+          description: Validation runs, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ValidationRun'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /projects/{projectId}/validation-runs/latest:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [Validation]
+      summary: Get the latest validation run
+      operationId: getLatestValidationRun
+      responses:
+        '200':
+          description: Latest validation run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationRun'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{projectId}/exports:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [Export]
+      summary: Export the finalized project
+      description: |
+        Only valid when the project is `Finalized` and the latest validation run passed.
+        Generates all files in a temporary location and uploads only if every file succeeds
+        (all-or-nothing). Creates a new package version and transitions to `Exported`.
+      operationId: createExport
+      responses:
+        '201':
+          description: Export package created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportPackage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    get:
+      tags: [Export]
+      summary: List export packages
+      operationId: listExports
+      responses:
+        '200':
+          description: Export packages, newest version first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExportPackage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /projects/{projectId}/exports/{versionNumber}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: versionNumber
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    get:
+      tags: [Export]
+      summary: Get an export package
+      operationId: getExportPackage
+      responses:
+        '200':
+          description: Export package
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportPackage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{projectId}/exports/{versionNumber}/files/{fileName}/download-url:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: versionNumber
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+      - name: fileName
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Export]
+      summary: Get a download URL for one exported file
+      operationId: getExportFileDownloadUrl
+      responses:
+        '200':
+          description: Pre-signed GET URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DownloadUrl'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Platform JWT forwarded by the NestJS server. Claims include `sub`, `tenant_id`, and global roles.
+
+  parameters:
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    MemberId:
+      name: memberId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    DocumentId:
+      name: documentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    VersionId:
+      name: versionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RunId:
+      name: runId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RoundNumber:
+      name: roundNumber
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+    ItemId:
+      name: itemId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    Forbidden:
+      description: Authenticated but not permitted for this project or action
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: Resource not found in the caller's tenant
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: Request conflicts with current state (lifecycle guard, unresolved items, already-running run)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ValidationError:
+      description: Request failed validation
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    EntityType:
+      type: string
+      enum: [Company, Location, Department, CostCenter, JobTitle, Employee, ReportingLine, Role, ApprovalWorkflow]
+    ProjectStatus:
+      type: string
+      enum: [Setup, Collecting Documents, In Analysis, In Review, Finalized, Exported]
+    DocumentStatus:
+      type: string
+      enum: [Uploaded, Analyzed, Superseded, Parse Failed]
+    AnalysisRunStatus:
+      type: string
+      enum: [Queued, Running, Completed, Failed]
+    DecisionAction:
+      type: string
+      enum: [Accept, Reject, Modify]
+    Confidence:
+      type: string
+      enum: [High, Medium, Low]
+    ValidationOutcome:
+      type: string
+      enum: [Pass, Fail]
+    AIProvider:
+      type: string
+      enum: [OPENAI, LOCAL_QWEN]
+    ProjectRole:
+      type: string
+      enum: [CONSULTANT, CUSTOMER_REVIEWER, PROJECT_MANAGER, ADMIN]
+    ItemState:
+      type: string
+      enum: [Pending, Accepted, Rejected, Modified]
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field: { type: string }
+              message: { type: string }
+    HealthResponse:
+      type: object
+      required: [status, version]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        version: { type: string }
+
+    ProjectCreate:
+      type: object
+      required: [customerId, name, scopedEntityTypes, aiProvider]
+      properties:
+        customerId: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 200 }
+        scopedEntityTypes:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/EntityType'
+        aiProvider:
+          $ref: '#/components/schemas/AIProvider'
+        contextNotes: { type: string, nullable: true }
+    ProjectUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        scopedEntityTypes:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/EntityType'
+        aiProvider:
+          $ref: '#/components/schemas/AIProvider'
+        contextNotes: { type: string, nullable: true }
+    Project:
+      type: object
+      required: [id, tenantId, customerId, name, status, aiProvider, scopedEntityTypes, currentRound, createdBy, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        customerId: { type: string, format: uuid }
+        name: { type: string }
+        status:
+          $ref: '#/components/schemas/ProjectStatus'
+        aiProvider:
+          $ref: '#/components/schemas/AIProvider'
+        scopedEntityTypes:
+          type: array
+          items:
+            $ref: '#/components/schemas/EntityType'
+        currentRound: { type: integer }
+        reopenCount: { type: integer }
+        contextNotes: { type: string, nullable: true }
+        createdBy: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ProjectPage:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Project'
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
+    ProjectOverview:
+      type: object
+      required: [projectId, status, currentRound, itemCounts, validation, documentCounts]
+      properties:
+        projectId: { type: string, format: uuid }
+        status:
+          $ref: '#/components/schemas/ProjectStatus'
+        currentRound: { type: integer }
+        itemCounts:
+          type: object
+          properties:
+            pending: { type: integer }
+            accepted: { type: integer }
+            rejected: { type: integer }
+            modified: { type: integer }
+            conflicts: { type: integer }
+            assumptions: { type: integer }
+        validation:
+          type: object
+          nullable: true
+          properties:
+            overallResult:
+              $ref: '#/components/schemas/ValidationOutcome'
+            triggeredAt: { type: string, format: date-time }
+        documentCounts:
+          type: object
+          properties:
+            active: { type: integer }
+            superseded: { type: integer }
+            parseFailed: { type: integer }
+        lastExportVersion: { type: integer, nullable: true }
+    TransitionRequest:
+      type: object
+      required: [targetStatus]
+      properties:
+        targetStatus:
+          $ref: '#/components/schemas/ProjectStatus'
+        comment: { type: string, nullable: true }
+    ReopenRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1 }
+
+    MemberCreate:
+      type: object
+      required: [userId, role]
+      properties:
+        userId: { type: string, format: uuid }
+        role:
+          $ref: '#/components/schemas/ProjectRole'
+    ProjectMember:
+      type: object
+      required: [id, projectId, userId, role, addedBy, addedAt]
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        role:
+          $ref: '#/components/schemas/ProjectRole'
+        addedBy: { type: string, format: uuid }
+        addedAt: { type: string, format: date-time }
+
+    DocumentCreate:
+      type: object
+      required: [documentType, fileName, mimeType, sizeBytes]
+      properties:
+        documentType: { type: string, minLength: 1 }
+        fileName: { type: string, minLength: 1 }
+        mimeType: { type: string }
+        sizeBytes: { type: integer, minimum: 1 }
+        notes: { type: string, nullable: true }
+    DocumentVersionCreate:
+      type: object
+      required: [fileName, mimeType, sizeBytes]
+      properties:
+        fileName: { type: string, minLength: 1 }
+        mimeType: { type: string }
+        sizeBytes: { type: integer, minimum: 1 }
+        notes: { type: string, nullable: true }
+    DocumentVersionComplete:
+      type: object
+      required: [checksumSha256]
+      properties:
+        checksumSha256: { type: string, minLength: 1 }
+    DocumentUploadTicket:
+      type: object
+      required: [documentId, versionId, uploadUrl, storageKey, expiresAt]
+      properties:
+        documentId: { type: string, format: uuid }
+        versionId: { type: string, format: uuid }
+        uploadUrl: { type: string, format: uri }
+        storageKey: { type: string }
+        expiresAt: { type: string, format: date-time }
+    DocumentVersion:
+      type: object
+      required: [id, documentId, versionNumber, fileName, mimeType, sizeBytes, checksumSha256, uploadStatus, uploadedBy]
+      properties:
+        id: { type: string, format: uuid }
+        documentId: { type: string, format: uuid }
+        versionNumber: { type: integer }
+        fileName: { type: string }
+        mimeType: { type: string }
+        sizeBytes: { type: integer }
+        checksumSha256: { type: string }
+        uploadStatus: { type: string, enum: [Pending, Uploaded, Failed] }
+        uploadedBy: { type: string, format: uuid }
+        uploadedAt: { type: string, format: date-time, nullable: true }
+        supersededAt: { type: string, format: date-time, nullable: true }
+    Document:
+      type: object
+      required: [id, projectId, documentType, status, createdBy, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        documentType: { type: string }
+        status:
+          $ref: '#/components/schemas/DocumentStatus'
+        currentVersionId: { type: string, format: uuid, nullable: true }
+        notes: { type: string, nullable: true }
+        createdBy: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+    DocumentDetail:
+      allOf:
+        - $ref: '#/components/schemas/Document'
+        - type: object
+          properties:
+            versions:
+              type: array
+              items:
+                $ref: '#/components/schemas/DocumentVersion'
+    DownloadUrl:
+      type: object
+      required: [url, expiresAt]
+      properties:
+        url: { type: string, format: uri }
+        expiresAt: { type: string, format: date-time }
+
+    AnalysisRunTrigger:
+      type: object
+      properties:
+        comment: { type: string, nullable: true }
+    AnalysisRun:
+      type: object
+      required: [id, projectId, roundNumber, status, aiProvider, documentVersionIds, triggeredBy]
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        roundNumber: { type: integer }
+        status:
+          $ref: '#/components/schemas/AnalysisRunStatus'
+        aiProvider:
+          $ref: '#/components/schemas/AIProvider'
+        documentVersionIds:
+          type: array
+          items: { type: string, format: uuid }
+        triggeredBy: { type: string, format: uuid }
+        startedAt: { type: string, format: date-time, nullable: true }
+        completedAt: { type: string, format: date-time, nullable: true }
+        errorMessage: { type: string, nullable: true }
+
+    SourceRef:
+      type: object
+      required: [documentVersionId, fileName]
+      properties:
+        documentVersionId: { type: string, format: uuid }
+        documentId: { type: string, format: uuid }
+        fileName: { type: string }
+        documentType: { type: string }
+        page: { type: integer, nullable: true }
+        sheet: { type: string, nullable: true }
+        row: { type: integer, nullable: true }
+        cell: { type: string, nullable: true }
+        excerpt: { type: string, nullable: true }
+    ConflictAlternative:
+      type: object
+      required: [value, sourceRef]
+      properties:
+        value: { type: object, additionalProperties: true }
+        sourceRef:
+          $ref: '#/components/schemas/SourceRef'
+    ProposalItem:
+      type: object
+      required: [id, proposalId, entityType, entityKey, proposedValue, explanation, confidence, isAssumption, hasConflict, sourceRefs, state]
+      properties:
+        id: { type: string, format: uuid }
+        proposalId: { type: string, format: uuid }
+        entityType:
+          $ref: '#/components/schemas/EntityType'
+        entityKey: { type: string }
+        proposedValue: { type: object, additionalProperties: true }
+        explanation: { type: string }
+        confidence:
+          $ref: '#/components/schemas/Confidence'
+        isAssumption: { type: boolean }
+        hasConflict: { type: boolean }
+        conflictAlternatives:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/ConflictAlternative'
+        sourceRefs:
+          type: array
+          items:
+            $ref: '#/components/schemas/SourceRef'
+        likelyDuplicateOf: { type: string, nullable: true }
+        carriedFromItemId: { type: string, format: uuid, nullable: true }
+        state:
+          $ref: '#/components/schemas/ItemState'
+        latestDecision:
+          $ref: '#/components/schemas/Decision'
+    ProposalRoundSummary:
+      type: object
+      required: [id, projectId, roundNumber, createdAt, itemCounts]
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        roundNumber: { type: integer }
+        createdAt: { type: string, format: date-time }
+        itemCounts:
+          type: object
+          properties:
+            total: { type: integer }
+            pending: { type: integer }
+            accepted: { type: integer }
+            rejected: { type: integer }
+            modified: { type: integer }
+            conflicts: { type: integer }
+            assumptions: { type: integer }
+    ProposalRound:
+      type: object
+      required: [id, projectId, roundNumber, createdAt, items, page, pageSize, total]
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        roundNumber: { type: integer }
+        createdAt: { type: string, format: date-time }
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProposalItem'
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
+    RoundComparisonRow:
+      type: object
+      required: [entityType, entityKey]
+      properties:
+        entityType:
+          $ref: '#/components/schemas/EntityType'
+        entityKey: { type: string }
+        state: { type: string, enum: [Added, Removed, Changed, Unchanged] }
+        firstValue: { type: object, nullable: true, additionalProperties: true }
+        secondValue: { type: object, nullable: true, additionalProperties: true }
+        firstConfidence:
+          $ref: '#/components/schemas/Confidence'
+        secondConfidence:
+          $ref: '#/components/schemas/Confidence'
+    RoundComparison:
+      type: object
+      required: [projectId, roundNumber, otherRoundNumber, rows]
+      properties:
+        projectId: { type: string, format: uuid }
+        roundNumber: { type: integer }
+        otherRoundNumber: { type: integer }
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoundComparisonRow'
+
+    DecisionCreate:
+      type: object
+      required: [action]
+      properties:
+        action:
+          $ref: '#/components/schemas/DecisionAction'
+        resultingValue:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Required for `Modify`; ignored for `Accept`/`Reject`.
+        comment:
+          type: string
+          nullable: true
+          description: Required for `Reject` and `Modify`.
+    Decision:
+      type: object
+      required: [id, proposalItemId, action, resultingValue, decidedBy, decidedAt, reopened]
+      properties:
+        id: { type: string, format: uuid }
+        proposalItemId: { type: string, format: uuid }
+        action:
+          $ref: '#/components/schemas/DecisionAction'
+        resultingValue: { type: object, additionalProperties: true }
+        comment: { type: string, nullable: true }
+        decidedBy: { type: string, format: uuid }
+        decidedAt: { type: string, format: date-time }
+        reopened: { type: boolean }
+
+    ValidationFailingRecord:
+      type: object
+      properties:
+        entityType:
+          $ref: '#/components/schemas/EntityType'
+        entityKey: { type: string }
+        detail: { type: string }
+    ValidationResult:
+      type: object
+      required: [ruleCode, result]
+      properties:
+        ruleCode:
+          type: string
+          enum: [REFERENTIAL_INTEGRITY, DUPLICATE_IDENTIFIER, ORPHANED_ENTITY, UNRESOLVED_CONFLICT, UNACKNOWLEDGED_ASSUMPTION]
+        result:
+          $ref: '#/components/schemas/ValidationOutcome'
+        failingRecords:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/ValidationFailingRecord'
+    ValidationRun:
+      type: object
+      required: [id, projectId, roundNumber, triggeredBy, triggeredAt, overallResult, results]
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        roundNumber: { type: integer }
+        triggeredBy: { type: string, format: uuid }
+        triggeredAt: { type: string, format: date-time }
+        overallResult:
+          $ref: '#/components/schemas/ValidationOutcome'
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationResult'
+
+    ExportFile:
+      type: object
+      required: [name, key, checksumSha256]
+      properties:
+        name: { type: string }
+        key: { type: string }
+        checksumSha256: { type: string }
+    ExportPackage:
+      type: object
+      required: [id, projectId, versionNumber, storagePrefix, files, exportedBy, exportedAt]
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        versionNumber: { type: integer }
+        storagePrefix: { type: string }
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExportFile'
+        validationRunId: { type: string, format: uuid }
+        exportedBy: { type: string, format: uuid }
+        exportedAt: { type: string, format: date-time }
+
+    AuditEvent:
+      type: object
+      required: [id, tenantId, action, payload, occurredAt]
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid, nullable: true }
+        tenantId: { type: string, format: uuid }
+        actorId: { type: string, format: uuid, nullable: true }
+        action: { type: string }
+        entityType: { type: string, nullable: true }
+        entityId: { type: string, format: uuid, nullable: true }
+        payload: { type: object, additionalProperties: true }
+        occurredAt: { type: string, format: date-time }
+    AuditEventPage:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEvent'
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
